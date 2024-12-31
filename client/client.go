@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
@@ -17,16 +18,14 @@ var (
 )
 
 func main() {
-	token := generateToken()
-	fmt.Printf("token: %s\n", token)
-	response, err := sendRequest(token)
-	if err != nil {
-		log.Fatalf("Failed to validate token: %v", err)
-	}
-	fmt.Println("Server Response:", response)
+	http.HandleFunc("/", serveForm)
+	http.HandleFunc("/submit", handleSubmit)
+
+	fmt.Println("Client server is running on http://localhost:8081")
+	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
-func generateToken() string {
+func generateToken(clientID, clientSecret string) (string, error) {
 	if oktaDomain == "" || clientID == "" || clientSecret == "" {
 		log.Fatalf("Missing required environment variables")
 	}
@@ -35,8 +34,7 @@ func generateToken() string {
 
 	// Request body
 	data := map[string]string{
-		"grant_type": "client_credentials",
-		// "scope":         "openid profile email",
+		"grant_type":    "client_credentials",
 		"client_id":     clientID,
 		"client_secret": clientSecret,
 		"audience":      "https://oktathesis",
@@ -45,33 +43,33 @@ func generateToken() string {
 
 	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(body))
 	if err != nil {
-		log.Fatalf("Failed to create request: %v", err)
+		return "", fmt.Errorf("Failed to create request: %v", err)
 	}
 	req.Header.Set("content-type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Failed to get response: %v", err)
+		return "", fmt.Errorf("Failed to get response: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var result bytes.Buffer
 	_, err = io.Copy(&result, resp.Body)
 	if err != nil {
-		log.Fatalf("Failed to read response body: %v", err)
+		return "", fmt.Errorf("Failed to read response body: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("Failed to get token: %s", result.String())
+		return "", fmt.Errorf("Failed to get token: %s", result.String())
 	}
 
 	var tokenResponse map[string]interface{}
 	err = json.Unmarshal(result.Bytes(), &tokenResponse)
 	if err != nil {
-		log.Fatalf("Failed to unmarshal response: %v", err)
+		return "", err
 	}
 	accesstoken := tokenResponse["access_token"].(string)
-	return accesstoken
+	return accesstoken, nil
 }
 
 func sendRequest(token string) (string, error) {
@@ -105,4 +103,48 @@ func sendRequest(token string) (string, error) {
 	}
 
 	return responseBody.String(), nil
+}
+
+// Serve the HTML form
+func serveForm(w http.ResponseWriter, r *http.Request) {
+	tmpl, err := template.ParseFiles("templates/form.html")
+	if err != nil {
+		fmt.Println("Error parsing form template:", err)
+		http.Error(w, "Error rendering form", http.StatusInternalServerError)
+		return
+	}
+	tmpl.Execute(w, nil)
+}
+
+// Handle form submission
+func handleSubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	clientID := r.FormValue("clientID")
+	clientSecret := r.FormValue("clientSecret")
+
+	if clientID == "" || clientSecret == "" {
+		http.Error(w, "Missing clientID or clientSecret", http.StatusBadRequest)
+		return
+	}
+
+	// Generate token
+	token, err := generateToken(clientID, clientSecret)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error generating token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Validate token
+	response, err := sendRequest(token)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error validating token: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Send response back to the user
+	fmt.Fprintf(w, "Token validation response: %s", response)
 }
